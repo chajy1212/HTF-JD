@@ -8,6 +8,8 @@ import numpy as np
 import nibabel as nib
 import matplotlib.pyplot as plt
 import matplotlib.patches as patches
+from collections import Counter
+
 from data_loader import load_label_dict, PatchDataset, CTPatchDataset
 
 
@@ -40,9 +42,6 @@ class SimpleCNN(nn.Module):
 # 2) CT-level inference (패치 → majority vote)
 # ============================================================
 def predict_ct(model, ct_dir, device):
-    """
-    ct_dir: ex) /home/jycha/HTF/patches/000000507
-    """
     dataset = CTPatchDataset(ct_dir)
     loader = DataLoader(dataset, batch_size=64, shuffle=False)
 
@@ -57,26 +56,23 @@ def predict_ct(model, ct_dir, device):
             preds.extend(pred.cpu().tolist())
 
     if len(preds) == 0:
-        raise RuntimeError(f"[ERROR] No patches in CT folder: {ct_dir}")
+        raise RuntimeError(f"[ERROR] no patches: {ct_dir}")
 
-    # Majority Vote
     final_pred = max(set(preds), key=preds.count)
+
     return final_pred
 
 
 # ============================================================
-# 3) Train + Validation + Test 분리 학습
+# 3) Train + Validation + Loss Weighting
 # ============================================================
 def train_model():
-
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"[Device] {device}")
 
-    # Load labels (from Excel)
     excel_path = "/home/jycha/HTF/patient_whole_add.xlsx"
     label_dict = load_label_dict(excel_path)
 
-    # Load CT patch folders
     patch_root = "/home/jycha/HTF/patches"
 
     ct_ids = sorted([
@@ -86,36 +82,51 @@ def train_model():
 
     n = len(ct_ids)
     if n < 10:
-        raise ValueError("CT 개수가 너무 적습니다. 데이터 확인 필요.")
+        raise ValueError("CT sample too small.")
 
-    # Train / Valid / Test Split
+    # Split
     train_ids = ct_ids[:int(n * 0.70)]
-    val_ids   = ct_ids[int(n * 0.70):int(n * 0.85)]
-    test_ids  = ct_ids[int(n * 0.85):]
+    val_ids = ct_ids[int(n * 0.70):int(n * 0.85)]
+    test_ids = ct_ids[int(n * 0.85):]
 
-    print("\n[Split Info]")
-    print(" Train CT :", len(train_ids))
-    print(" Val CT   :", len(val_ids))
-    print(" Test CT  :", len(test_ids))
+    print("\n[Split]")
+    print(" Train:", len(train_ids))
+    print(" Val  :", len(val_ids))
+    print(" Test :", len(test_ids))
 
     # Dataset
     train_ds = PatchDataset(patch_root, label_dict, split_ids=train_ids)
-    val_ds   = PatchDataset(patch_root, label_dict, split_ids=val_ids)
+    val_ds = PatchDataset(patch_root, label_dict, split_ids=val_ids)
 
     print(f"[PatchDataset] Train patches: {len(train_ds)}")
-    print(f"[PatchDataset] Val patches:   {len(val_ds)}\n")
+    print(f"[PatchDataset] Val patches:   {len(val_ds)}")
 
+    # 클래스 분포 출력
+    train_counts = Counter(train_ds.labels)
+    val_counts = Counter(val_ds.labels)
+    print("[Train Patch Distribution]", train_counts)
+    print("[Val Patch Distribution]  ", val_counts)
+
+    # Loss Weight 계산
+    total_train = len(train_ds.labels)
+    w0 = total_train / (2 * train_counts[0])
+    w1 = total_train / (2 * train_counts[1])
+
+    print(f"[Weights] Class0={w0:.4f}, Class1={w1:.4f}")
+
+    weights = torch.tensor([w0, w1], dtype=torch.float32).to(device)
+    loss_fn = nn.CrossEntropyLoss(weight=weights)
+
+    # Loader
     train_loader = DataLoader(train_ds, batch_size=64, shuffle=True)
-    val_loader   = DataLoader(val_ds, batch_size=64, shuffle=False)
+    val_loader = DataLoader(val_ds, batch_size=64, shuffle=False)
 
-    # Model/Optimizer/Loss
+    # Model
     model = SimpleCNN(num_classes=2).to(device)
     optimizer = optim.Adam(model.parameters(), lr=1e-3)
-    loss_fn = nn.CrossEntropyLoss()
 
-    # Training Loop
-    epochs = 10
-
+    # Train
+    epochs = 200
     for ep in range(epochs):
         model.train()
         total_loss = 0
@@ -131,7 +142,7 @@ def train_model():
 
             total_loss += loss.item()
 
-        print(f"\n[Epoch {ep+1}] Train Loss: {total_loss / len(train_loader):.4f}")
+        print(f"\n[Epoch {ep + 1}] Train Loss: {total_loss / len(train_loader):.4f}")
 
         # Validation
         model.eval()
@@ -146,7 +157,7 @@ def train_model():
 
         print(f"Patch-level Val Acc: {correct / total:.4f}")
 
-    # Save model
+    # Save
     save_path = "/home/jycha/HTF/model.pth"
     torch.save(model.state_dict(), save_path)
     print(f"[Saved] {save_path}")
@@ -174,15 +185,15 @@ def visualize_ct_prediction(model, ct_id, patch_root, nii_root, device, save_dir
     ct_dir = os.path.join(patch_root, ct_id)
     patch_files = sorted([f for f in os.listdir(ct_dir) if f.endswith(".npy")])
 
-    heatmap = np.zeros_like(slice_img, dtype=float)
-    countmap = np.zeros_like(slice_img, dtype=float)
+    heatmap = np.zeros_like(slice_img)
+    countmap = np.zeros_like(slice_img)
 
     patch_pred_list = []
 
     model.eval()
     with torch.no_grad():
-
         for fname in patch_files:
+
             m = re.search(r"_z(\d+)_y(\d+)_x(\d+)_p", fname)
             if m is None:
                 continue
@@ -200,11 +211,7 @@ def visualize_ct_prediction(model, ct_id, patch_root, nii_root, device, save_dir
             pred = torch.argmax(prob).item()
             score = float(prob[pred].item())
 
-            patch_pred_list.append({
-                "coord": (y, x),
-                "pred": pred,
-                "score": score
-            })
+            patch_pred_list.append({"coord": (y, x), "pred": pred, "score": score})
 
             heatmap[y:y + 64, x:x + 64] += score
             countmap[y:y + 64, x:x + 64] += 1
@@ -214,10 +221,8 @@ def visualize_ct_prediction(model, ct_id, patch_root, nii_root, device, save_dir
     final_heatmap[mask] = heatmap[mask] / countmap[mask]
 
     if len(patch_pred_list) > 0:
-        ct_pred = max(
-            [p["pred"] for p in patch_pred_list],
-            key=[p["pred"] for p in patch_pred_list].count
-        )
+        ct_pred = max([p["pred"] for p in patch_pred_list],
+                      key=[p["pred"] for p in patch_pred_list].count)
     else:
         ct_pred = -1
 
@@ -228,7 +233,6 @@ def visualize_ct_prediction(model, ct_id, patch_root, nii_root, device, save_dir
         y, x = p["coord"]
         pred = p["pred"]
         score = p["score"]
-
         color = "red" if pred == 1 else "blue"
 
         rect = patches.Rectangle((x, y), 64, 64, linewidth=1.5,
@@ -243,7 +247,7 @@ def visualize_ct_prediction(model, ct_id, patch_root, nii_root, device, save_dir
     ax.axis("off")
 
     save_path = os.path.join(save_dir, f"{ct_id}_viz.png")
-    plt.savefig(save_path, dpi=150, bbox_inches='tight')
+    plt.savefig(save_path, dpi=150, bbox_inches="tight")
     # plt.show()
     plt.close()
 
@@ -251,7 +255,7 @@ def visualize_ct_prediction(model, ct_id, patch_root, nii_root, device, save_dir
 
 
 # ============================================================
-# 5) Test + Visualization
+# 5) Evaluate + Visualize
 # ============================================================
 def evaluate_ct_level(model, patch_root, test_ids, device):
     print("\n==========================")
@@ -261,10 +265,11 @@ def evaluate_ct_level(model, patch_root, test_ids, device):
     nii_root = "/data/Cloud-basic/shared/Dataset/HTF/nifti_masked"
     save_dir = "/home/jycha/HTF/plot"
 
+    os.makedirs(save_dir, exist_ok=True)
+
     for ct_id in test_ids:
-        ct_dir = os.path.join(patch_root, ct_id)
-        pred = predict_ct(model, ct_dir, device)
-        print(f"CT {ct_id} → Predicted label: {pred}")
+        pred = predict_ct(model, os.path.join(patch_root, ct_id), device)
+        print(f"CT {ct_id} → Pred label: {pred}")
 
         visualize_ct_prediction(
             model=model,

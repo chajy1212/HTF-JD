@@ -27,51 +27,49 @@ def load_label_dict(excel_path):
 # 2) Patch Dataset (훈련/검증용)
 # ============================================================
 class PatchDataset(Dataset):
-    def __init__(self, root_dir, label_dict, split_ids=None):
+    def __init__(self, root_dir, label_dict, split_ids):
         """
-        root_dir: /patch_all/
-        split_ids: train 또는 val 또는 test에 사용할 CT ID 리스트
+        root_dir: /home/jycha/HTF/patches
+        split_ids: 학습에 사용할 CT
         """
         self.root_dir = root_dir
         self.label_dict = label_dict
         self.samples = []
+        self.labels = []
 
-        # split_ids 없으면 전체 사용
-        if split_ids is None:
-            split_ids = sorted(os.listdir(root_dir))
-
+        # CT ID 순회
         for ct_id in split_ids:
-            ct_dir = os.path.join(root_dir, ct_id)
-            if not os.path.isdir(ct_dir):
-                continue
-            if ct_id not in label_dict:
+            ct_path = os.path.join(root_dir, ct_id)
+
+            if not os.path.isdir(ct_path):
                 continue
 
-            label = label_dict[ct_id]
-            for fname in os.listdir(ct_dir):
+            # 패치 파일 로딩
+            for fname in os.listdir(ct_path):
                 if fname.endswith(".npy"):
-                    self.samples.append((os.path.join(ct_dir, fname), label))
+                    fpath = os.path.join(ct_path, fname)
 
-        print(f"[PatchDataset] Loaded {len(self.samples)} patches from {len(split_ids)} CTs")
+                    label = label_dict.get(ct_id, None)
+                    if label is None:
+                        continue
+
+                    self.samples.append((fpath, label))
+                    self.labels.append(label)
 
     def __len__(self):
         return len(self.samples)
 
     def __getitem__(self, idx):
-        path, label = self.samples[idx]
+        fpath, label = self.samples[idx]
 
-        patch = np.load(path).astype(np.float32)
+        patch = np.load(fpath).astype(np.float32)
 
-        # normalize
-        patch = (patch - patch.min()) / (patch.max() - patch.min() + 1e-6)
+        # Normalize
+        patch = (patch - patch.mean()) / (patch.std() + 1e-6)
 
-        # (H, W) → (1, H, W)
-        patch = np.expand_dims(patch, axis=0)
-        patch = torch.tensor(patch, dtype=torch.float32)
+        patch = patch[None, :, :]  # (1, H, W)
 
-        label = torch.tensor(label, dtype=torch.long)
-
-        return patch, label
+        return torch.tensor(patch, dtype=torch.float32), torch.tensor(label, dtype=torch.long)
 
 
 # ============================================================
