@@ -244,7 +244,7 @@ def visualize_ct_prediction(model, ct_id, patch_root, nii_root, device, save_dir
 
     save_path = os.path.join(save_dir, f"{ct_id}_viz.png")
     plt.savefig(save_path, dpi=150, bbox_inches='tight')
-    plt.show()
+    # plt.show()
     plt.close()
 
     print(f"[Saved] {save_path}")
