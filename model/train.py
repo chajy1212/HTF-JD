@@ -10,7 +10,7 @@ import matplotlib.pyplot as plt
 
 from data_loader import load_label_dict, BagDataset, CTPatchDataset
 
-
+"""
 # ============================================================
 # 1) CNN patch encoder (patch → feature)
 # ============================================================
@@ -35,6 +35,27 @@ class PatchEncoder(nn.Module):
         x = self.conv(x)
         x = self.fc(x)
         return x  # (B, feat_dim)
+"""
+
+
+# ============================================================
+# 1) 3-Layer MLP patch encoder
+# ============================================================
+class PatchEncoder(nn.Module):
+    def __init__(self, feat_dim=128):
+        super().__init__()
+        self.mlp = nn.Sequential(
+            nn.Flatten(),                      # (1,64,64) → (4096)
+            nn.Linear(64*64, 512),
+            nn.ReLU(),
+            nn.Linear(512, 256),
+            nn.ReLU(),
+            nn.Linear(256, feat_dim),
+            nn.ReLU()
+        )
+
+    def forward(self, x):
+        return self.mlp(x)  # (B, feat_dim)
 
 
 # ============================================================
