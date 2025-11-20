@@ -10,154 +10,135 @@ import matplotlib.pyplot as plt
 import matplotlib.patches as patches
 from collections import Counter
 
-from data_loader import load_label_dict, PatchDataset, CTPatchDataset
+from data_loader import load_label_dict, BagDataset, CTPatchDataset
 
 
 # ============================================================
-# 1) Simple CNN 모델
+# 1) CNN patch encoder (patch → feature)
 # ============================================================
-class SimpleCNN(nn.Module):
-    def __init__(self, num_classes=2):
+class PatchEncoder(nn.Module):
+    def __init__(self, feat_dim=128):
         super().__init__()
-        self.net = nn.Sequential(
+        self.conv = nn.Sequential(
             nn.Conv2d(1, 16, 3, padding=1),
             nn.ReLU(),
-            nn.MaxPool2d(2),  # 64 → 32
-
+            nn.MaxPool2d(2),  # 64→32
             nn.Conv2d(16, 32, 3, padding=1),
             nn.ReLU(),
-            nn.MaxPool2d(2),  # 32 → 16
-
+            nn.MaxPool2d(2),  # 32→16
+        )
+        self.fc = nn.Sequential(
             nn.Flatten(),
-            nn.Linear(32 * 16 * 16, 128),
-            nn.ReLU(),
-            nn.Linear(128, num_classes)
+            nn.Linear(32 * 16 * 16, feat_dim),
+            nn.ReLU()
         )
 
     def forward(self, x):
-        return self.net(x)
+        x = self.conv(x)
+        x = self.fc(x)
+        return x  # (B, feat_dim)
 
 
 # ============================================================
-# 2) CT-level inference (패치 → majority vote)
+# 2) CT-level MIL classifier
 # ============================================================
-def predict_ct(model, ct_dir, device):
-    dataset = CTPatchDataset(ct_dir)
-    loader = DataLoader(dataset, batch_size=64, shuffle=False)
+class MILClassifier(nn.Module):
+    def __init__(self, feat_dim=128, num_classes=2):
+        super().__init__()
+        self.encoder = PatchEncoder(feat_dim)
+        self.classifier = nn.Linear(feat_dim, num_classes)
 
-    preds = []
-    model.eval()
-
-    with torch.no_grad():
-        for patches, _ in loader:
-            patches = patches.to(device)
-            logits = model(patches)
-            pred = torch.argmax(logits, dim=1)
-            preds.extend(pred.cpu().tolist())
-
-    if len(preds) == 0:
-        raise RuntimeError(f"[ERROR] no patches: {ct_dir}")
-
-    final_pred = max(set(preds), key=preds.count)
-
-    return final_pred
+    def forward(self, bag):
+        """
+        bag: (N, 1, 64, 64)  -> N개의 patch
+        """
+        feats = self.encoder(bag)        # (N, 128)
+        bag_feat = feats.mean(dim=0)     # (128,) 평균 MIL
+        logits = self.classifier(bag_feat.unsqueeze(0))  # (1, num_classes)
+        return logits, feats, bag_feat
 
 
 # ============================================================
-# 3) Train + Validation + Loss Weighting
+# 3) Train (MIL)
 # ============================================================
 def train_model():
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"[Device] {device}")
 
+    # Load labels
     excel_path = "/home/jycha/HTF/patient_whole_add.xlsx"
     label_dict = load_label_dict(excel_path)
 
     patch_root = "/home/jycha/HTF/patches"
 
+    # Load CT IDs
     ct_ids = sorted([
         d for d in os.listdir(patch_root)
         if os.path.isdir(os.path.join(patch_root, d)) and d in label_dict
     ])
 
     n = len(ct_ids)
-    if n < 10:
-        raise ValueError("CT sample too small.")
+    print(f"[Total CT] {n}")
 
-    # Split
     train_ids = ct_ids[:int(n * 0.70)]
-    val_ids = ct_ids[int(n * 0.70):int(n * 0.85)]
-    test_ids = ct_ids[int(n * 0.85):]
+    val_ids   = ct_ids[int(n * 0.70):int(n * 0.85)]
+    test_ids  = ct_ids[int(n * 0.85):]
 
     print("\n[Split]")
     print(" Train:", len(train_ids))
     print(" Val  :", len(val_ids))
     print(" Test :", len(test_ids))
 
-    # Dataset
-    train_ds = PatchDataset(patch_root, label_dict, split_ids=train_ids)
-    val_ds = PatchDataset(patch_root, label_dict, split_ids=val_ids)
+    # BagDataset 사용
+    train_ds = BagDataset(patch_root, train_ids, label_dict)
+    val_ds   = BagDataset(patch_root, val_ids, label_dict)
 
-    print(f"[PatchDataset] Train patches: {len(train_ds)}")
-    print(f"[PatchDataset] Val patches:   {len(val_ds)}")
+    train_loader = DataLoader(train_ds, batch_size=1, shuffle=True)
+    val_loader   = DataLoader(val_ds, batch_size=1, shuffle=False)
 
-    # 클래스 분포 출력
-    train_counts = Counter(train_ds.labels)
-    val_counts = Counter(val_ds.labels)
-    print("[Train Patch Distribution]", train_counts)
-    print("[Val Patch Distribution]  ", val_counts)
-
-    # Loss Weight 계산
-    total_train = len(train_ds.labels)
-    w0 = total_train / (2 * train_counts[0])
-    w1 = total_train / (2 * train_counts[1])
-
-    print(f"[Weights] Class0={w0:.4f}, Class1={w1:.4f}")
-
-    weights = torch.tensor([w0, w1], dtype=torch.float32).to(device)
-    loss_fn = nn.CrossEntropyLoss(weight=weights)
-
-    # Loader
-    train_loader = DataLoader(train_ds, batch_size=64, shuffle=True)
-    val_loader = DataLoader(val_ds, batch_size=64, shuffle=False)
+    print(f"[BagDataset] Train bags: {len(train_ds)}")
+    print(f"[BagDataset] Val bags:   {len(val_ds)}")
 
     # Model
-    model = SimpleCNN(num_classes=2).to(device)
-    optimizer = optim.Adam(model.parameters(), lr=1e-3)
+    model = MILClassifier().to(device)
+    optimizer = optim.Adam(model.parameters(), lr=1e-4)
+    loss_fn = nn.CrossEntropyLoss()
 
-    # Train
-    epochs = 200
+    epochs = 50
+
+    # Train loop
     for ep in range(epochs):
         model.train()
         total_loss = 0
 
-        for X, y in train_loader:
-            X, y = X.to(device), y.to(device)
+        for bag, label, _ in train_loader:
+            bag = bag.to(device)               # (1, N, 1, 64, 64) → (N,1,64,64)
+            bag = bag.squeeze(0)
+            label = label.to(device)
 
             optimizer.zero_grad()
-            logits = model(X)
-            loss = loss_fn(logits, y)
+            logits, feats, bag_feat = model(bag)
+            loss = loss_fn(logits, label.unsqueeze(0))
             loss.backward()
             optimizer.step()
 
             total_loss += loss.item()
 
-        print(f"\n[Epoch {ep + 1}] Train Loss: {total_loss / len(train_loader):.4f}")
-
         # Validation
         model.eval()
-        correct, total = 0, 0
-
+        correct = 0
+        total = 0
         with torch.no_grad():
-            for X, y in val_loader:
-                X, y = X.to(device), y.to(device)
-                pred = torch.argmax(model(X), dim=1)
-                correct += (pred == y).sum().item()
-                total += y.size(0)
+            for bag, label, _ in val_loader:
+                bag = bag.to(device).squeeze(0)
+                label = label.to(device)
+                logits, _, _ = model(bag)
+                pred = torch.argmax(logits, dim=1).item()
+                correct += (pred == label.item())
+                total += 1
 
-        print(f"Patch-level Val Acc: {correct / total:.4f}")
+        print(f"[Epoch {ep+1}] Loss={total_loss/len(train_loader):.4f} | Val Acc={correct/total:.4f}")
 
-    # Save
     save_path = "/home/jycha/HTF/model.pth"
     torch.save(model.state_dict(), save_path)
     print(f"[Saved] {save_path}")
@@ -166,7 +147,7 @@ def train_model():
 
 
 # ============================================================
-# 4) 시각화 — Patch heatmap + Pred + Rectangles
+# 4) Patch-level Visualization
 # ============================================================
 def visualize_ct_prediction(model, ct_id, patch_root, nii_root, device, save_dir):
     """
@@ -174,6 +155,7 @@ def visualize_ct_prediction(model, ct_id, patch_root, nii_root, device, save_dir
     (2) patch 예측값 표시
     (3) heatmap overlay
     (4) CT-level 최종 결과까지 표시
+    MIL에서 patch attention이 없기 때문에, patch embedding의 norm을 heatmap score로 사용
     """
     nii_path = os.path.join(nii_root, f"{ct_id}.nii.gz")
     img = nib.load(nii_path)
@@ -185,69 +167,53 @@ def visualize_ct_prediction(model, ct_id, patch_root, nii_root, device, save_dir
     ct_dir = os.path.join(patch_root, ct_id)
     patch_files = sorted([f for f in os.listdir(ct_dir) if f.endswith(".npy")])
 
-    heatmap = np.zeros_like(slice_img)
-    countmap = np.zeros_like(slice_img)
-
-    patch_pred_list = []
-
+    # Load all patches for MIL embedding
+    patches_list = []
+    coords = []
     model.eval()
+
     with torch.no_grad():
         for fname in patch_files:
-
             m = re.search(r"_z(\d+)_y(\d+)_x(\d+)_p", fname)
             if m is None:
                 continue
 
-            z, y, x = int(m.group(1)), int(m.group(2)), int(m.group(3))
+            z, y, x = map(int, m.groups())
             if z != z_mid:
                 continue
 
             patch = np.load(os.path.join(ct_dir, fname)).astype(np.float32)
-            patch = (patch - patch.min()) / (patch.max() - patch.min() + 1e-6)
-            patch_tensor = torch.tensor(patch[None, None], dtype=torch.float32).to(device)
+            patch = (patch - patch.mean()) / (patch.std() + 1e-6)
+            patches_list.append(patch)
+            coords.append((y, x))
 
-            logits = model(patch_tensor)
-            prob = torch.softmax(logits, dim=1)[0]
-            pred = torch.argmax(prob).item()
-            score = float(prob[pred].item())
+    patches_tensor = torch.tensor(patches_list, dtype=torch.float32).unsqueeze(1).to(device)
+    logits, feats, _ = model(patches_tensor)
+    ct_pred = torch.argmax(logits, dim=1).item()
 
-            patch_pred_list.append({"coord": (y, x), "pred": pred, "score": score})
+    # feat-norm heatmap
+    scores = torch.norm(feats, dim=1).cpu().numpy()
+    heatmap = np.zeros_like(slice_img)
+    countmap = np.zeros_like(slice_img)
 
-            heatmap[y:y + 64, x:x + 64] += score
-            countmap[y:y + 64, x:x + 64] += 1
+    for (y, x), s in zip(coords, scores):
+        heatmap[y:y + 64, x:x + 64] += s
+        countmap[y:y + 64, x:x + 64] += 1
 
-    final_heatmap = np.zeros_like(heatmap)
     mask = countmap > 0
-    final_heatmap[mask] = heatmap[mask] / countmap[mask]
+    final_map = np.zeros_like(heatmap)
+    final_map[mask] = heatmap[mask] / countmap[mask]
 
-    if len(patch_pred_list) > 0:
-        ct_pred = max([p["pred"] for p in patch_pred_list],
-                      key=[p["pred"] for p in patch_pred_list].count)
-    else:
-        ct_pred = -1
-
+    # Plot
     fig, ax = plt.subplots(figsize=(8, 8))
-    ax.imshow(slice_img, cmap="gray")
+    ax.imshow(slice_img, cmap='gray')
+    ax.imshow(final_map, cmap='jet', alpha=0.35)
+    ax.set_title(f"CT {ct_id} — MIL Pred: {ct_pred}")
+    ax.axis('off')
 
-    for p in patch_pred_list:
-        y, x = p["coord"]
-        pred = p["pred"]
-        score = p["score"]
-        color = "red" if pred == 1 else "blue"
-
-        rect = patches.Rectangle((x, y), 64, 64, linewidth=1.5,
-                                 edgecolor=color, facecolor='none')
-        ax.add_patch(rect)
-
-        ax.text(x, y - 5, f"{pred}:{score:.2f}",
-                color=color, fontsize=8, weight="bold")
-
-    ax.imshow(final_heatmap, cmap="jet", alpha=0.35)
-    ax.set_title(f"CT {ct_id} — Predicted: {ct_pred}")
-    ax.axis("off")
-
-    save_path = os.path.join(save_dir, f"{ct_id}_viz.png")
-    plt.savefig(save_path, dpi=150, bbox_inches="tight")
+    os.makedirs(save_dir, exist_ok=True)
+    save_path = os.path.join(save_dir, f"{ct_id}_mil_viz.png")
+    plt.savefig(save_path, dpi=150, bbox_inches='tight')
     # plt.show()
     plt.close()
 
@@ -259,26 +225,31 @@ def visualize_ct_prediction(model, ct_id, patch_root, nii_root, device, save_dir
 # ============================================================
 def evaluate_ct_level(model, patch_root, test_ids, device):
     print("\n==========================")
-    print(" CT-level Evaluation")
+    print(" CT-level Evaluation (MIL)")
     print("==========================")
 
     nii_root = "/data/Cloud-basic/shared/Dataset/HTF/nifti_masked"
     save_dir = "/home/jycha/HTF/plot"
 
-    os.makedirs(save_dir, exist_ok=True)
-
     for ct_id in test_ids:
-        pred = predict_ct(model, os.path.join(patch_root, ct_id), device)
+        ct_dir = os.path.join(patch_root, ct_id)
+        dataset = CTPatchDataset(ct_dir)
+        loader = DataLoader(dataset, batch_size=64, shuffle=False)
+
+        # MIL forward 전체
+        patches = []
+        for p, _ in loader:
+            patches.append(p)
+
+        patches = torch.cat(patches, dim=0).to(device)
+
+        with torch.no_grad():
+            logits, feats, bag_feat = model(patches)
+            pred = torch.argmax(logits, dim=1).item()
+
         print(f"CT {ct_id} → Pred label: {pred}")
 
-        visualize_ct_prediction(
-            model=model,
-            ct_id=ct_id,
-            patch_root=patch_root,
-            nii_root=nii_root,
-            device=device,
-            save_dir=save_dir
-        )
+        visualize_ct_prediction(model, ct_id, patch_root, nii_root, device, save_dir)
 
 
 # ============================================================

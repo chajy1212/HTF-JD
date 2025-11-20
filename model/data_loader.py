@@ -24,52 +24,56 @@ def load_label_dict(excel_path):
 
 
 # ============================================================
-# 2) Patch Dataset (훈련/검증용)
+# 2) BagDataset (CT-level)
+#    CT 하나에서 모든 패치를 모아서 하나의 Bag으로 반환
 # ============================================================
-class PatchDataset(Dataset):
-    def __init__(self, root_dir, label_dict, split_ids):
+class BagDataset(Dataset):
+    def __init__(self, root_dir, ct_ids, label_dict):
         """
         root_dir: /home/jycha/HTF/patches
-        split_ids: 학습에 사용할 CT
+        ct_ids: CT 단위 리스트 (train, val, test split)
         """
         self.root_dir = root_dir
+        self.ct_ids = ct_ids
         self.label_dict = label_dict
-        self.samples = []
-        self.labels = []
 
-        # CT ID 순회
-        for ct_id in split_ids:
-            ct_path = os.path.join(root_dir, ct_id)
-
-            if not os.path.isdir(ct_path):
-                continue
-
-            # 패치 파일 로딩
-            for fname in os.listdir(ct_path):
-                if fname.endswith(".npy"):
-                    fpath = os.path.join(ct_path, fname)
-
-                    label = label_dict.get(ct_id, None)
-                    if label is None:
-                        continue
-
-                    self.samples.append((fpath, label))
-                    self.labels.append(label)
+        # sanity check
+        self.ct_ids = [
+            ct for ct in self.ct_ids
+            if os.path.isdir(os.path.join(root_dir, ct))
+        ]
 
     def __len__(self):
-        return len(self.samples)
+        return len(self.ct_ids)
 
     def __getitem__(self, idx):
-        fpath, label = self.samples[idx]
 
-        patch = np.load(fpath).astype(np.float32)
+        ct_id = self.ct_ids[idx]
+        ct_dir = os.path.join(self.root_dir, ct_id)
+        label = self.label_dict[ct_id]
 
-        # Normalize
-        patch = (patch - patch.mean()) / (patch.std() + 1e-6)
+        # 패치 파일들 전부 로딩
+        patch_files = sorted([f for f in os.listdir(ct_dir) if f.endswith(".npy")])
 
-        patch = patch[None, :, :]  # (1, H, W)
+        patches = []
+        for fname in patch_files:
+            fpath = os.path.join(ct_dir, fname)
+            patch = np.load(fpath).astype(np.float32)
 
-        return torch.tensor(patch, dtype=torch.float32), torch.tensor(label, dtype=torch.long)
+            # Normalize
+            patch = (patch - patch.mean()) / (patch.std() + 1e-6)
+
+            patch = patch[None, :, :]   # (1, H, W)
+            patches.append(patch)
+
+        if len(patches) == 0:
+            raise RuntimeError(f"[ERROR] No patches found in {ct_dir}")
+
+        # stack → (N, 1, H, W)
+        patches = np.stack(patches, axis=0)
+        patches = torch.tensor(patches, dtype=torch.float32)
+
+        return patches, torch.tensor(label, dtype=torch.long), ct_id
 
 
 # ============================================================
@@ -96,4 +100,5 @@ class CTPatchDataset(Dataset):
         patch = np.expand_dims(patch, axis=0)
 
         patch = torch.tensor(patch, dtype=torch.float32)
+        
         return patch, fname

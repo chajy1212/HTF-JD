@@ -8,7 +8,7 @@ import matplotlib.pyplot as plt
 # ============================================================
 # 1) 단일 slice → 여러 patch 생성
 # ============================================================
-def create_patches_from_slice(slice_img, patch_size=64, stride=128, fg_ratio=0.2):
+def create_patches_from_slice(slice_img, patch_size=64, stride=32, fg_ratio=0.05):
     """
     slice_img: (H, W)
     patch_size: 패치 크기
@@ -21,9 +21,8 @@ def create_patches_from_slice(slice_img, patch_size=64, stride=128, fg_ratio=0.2
 
     for y in range(0, H - patch_size + 1, stride):
         for x in range(0, W - patch_size + 1, stride):
-            patch = slice_img[y:y+patch_size, x:x+patch_size]
+            patch = slice_img[y:y + patch_size, x:x + patch_size]
 
-            # foreground(>0) 비율 체크
             if np.sum(patch > 0) < min_fg_pixels:
                 continue
 
@@ -35,7 +34,7 @@ def create_patches_from_slice(slice_img, patch_size=64, stride=128, fg_ratio=0.2
 # ============================================================
 # 2) 3D volume → 2D slice → patch 생성
 # ============================================================
-def volume_to_patches(volume, patch_size=64, stride=128, fg_ratio=0.2):
+def volume_to_patches(volume, patch_size=64, stride=32, fg_ratio=0.05):
     """
     volume: (H, W, Z)
     """
@@ -89,7 +88,7 @@ def process_ct_file(path, patch_save_root):
     volume = img.get_fdata()  # (H, W, Z)
 
     # ① Patch 생성
-    patches = volume_to_patches(volume, patch_size=64, stride=128, fg_ratio=0.2)
+    patches = volume_to_patches(volume, patch_size=64, stride=32, fg_ratio=0.05)
 
     # ② Patch 저장
     save_dir = os.path.join(patch_save_root, base_name)
@@ -111,6 +110,6 @@ if __name__ == "__main__":
     print(f"Total NIfTI files: {len(nii_files)}")
     print("Processing first 10 files...\n")
 
-    for fname in nii_files:   # 테스트 → 나중에 전체로 변경 가능
+    for fname in nii_files:
         fpath = os.path.join(data_dir, fname)
         process_ct_file(fpath, patch_save_root)
