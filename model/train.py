@@ -46,13 +46,19 @@ class MILClassifier(nn.Module):
         self.encoder = PatchEncoder(feat_dim)
         self.classifier = nn.Linear(feat_dim, num_classes)
 
-    def forward(self, bag):
-        """
-        bag: (N, 1, 64, 64)  -> N개의 patch
-        """
-        feats = self.encoder(bag)        # (N, 128)
-        bag_feat = feats.mean(dim=0)     # (128,) 평균 MIL
-        logits = self.classifier(bag_feat.unsqueeze(0))  # (1, num_classes)
+    def forward(self, bag, batch_size=64):
+        all_feats = []
+        N = bag.size(0)
+
+        for i in range(0, N, batch_size):
+            batch = bag[i:i + batch_size]   # 작은 배치로 쪼갬
+            f = self.encoder(batch)         # CNN 계산
+            all_feats.append(f)
+
+        feats = torch.cat(all_feats, dim=0)
+        bag_feat = feats.mean(dim=0)
+
+        logits = self.classifier(bag_feat.unsqueeze(0))
         return logits, feats, bag_feat
 
 
