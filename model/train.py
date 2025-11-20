@@ -7,8 +7,6 @@ from torch.utils.data import DataLoader
 import numpy as np
 import nibabel as nib
 import matplotlib.pyplot as plt
-import matplotlib.patches as patches
-from collections import Counter
 
 from data_loader import load_label_dict, BagDataset, CTPatchDataset
 
@@ -66,10 +64,10 @@ def train_model():
     print(f"[Device] {device}")
 
     # Load labels
-    excel_path = "/home/jycha/HTF/patient_whole_add.xlsx"
+    excel_path = "/home/brainlab/Workspace/jycha/HTF/patient_whole_add.xlsx"
     label_dict = load_label_dict(excel_path)
 
-    patch_root = "/home/jycha/HTF/patches"
+    patch_root = "/home/brainlab/Workspace/jycha/HTF/patches"
 
     # Load CT IDs
     ct_ids = sorted([
@@ -97,7 +95,7 @@ def train_model():
     val_loader   = DataLoader(val_ds, batch_size=1, shuffle=False)
 
     print(f"\n[BagDataset] Train bags: {len(train_ds)}")
-    print(f"[BagDataset] Val bags:   {len(val_ds)}")
+    print(f"[BagDataset] Val bags:   {len(val_ds)}\n")
 
     # Model
     model = MILClassifier().to(device)
@@ -105,26 +103,36 @@ def train_model():
     loss_fn = nn.CrossEntropyLoss()
 
     epochs = 50
+    accumulation_steps = 4
 
     # Train loop
     for ep in range(epochs):
         model.train()
         total_loss = 0
+        optimizer.zero_grad()
 
-        for bag, label, _ in train_loader:
+        for step, (bag, label, _) in enumerate(train_loader):
             bag = bag.to(device).squeeze(0)
-            label = label.to(device)
+            label = label.to(device).squeeze().long()
 
-            label = label.squeeze().long()
-
-            optimizer.zero_grad()
             logits, feats, bag_feat = model(bag)
 
-            loss = loss_fn(logits, label.unsqueeze(0))
-            loss.backward()
-            optimizer.step()
+            # accumulation 전 loss 값 저장
+            raw_loss = loss_fn(logits, label.unsqueeze(0))
+            total_loss += raw_loss.item()
 
-            total_loss += loss.item()
+            # accumulation용 normalizing
+            loss = raw_loss / accumulation_steps
+            loss.backward()
+
+            if (step + 1) % accumulation_steps == 0:
+                optimizer.step()
+                optimizer.zero_grad()
+
+        # leftover gradient 처리
+        if (step + 1) % accumulation_steps != 0:
+            optimizer.step()
+            optimizer.zero_grad()
 
         # Validation
         model.eval()
@@ -133,16 +141,19 @@ def train_model():
         with torch.no_grad():
             for bag, label, _ in val_loader:
                 bag = bag.to(device).squeeze(0)
-                label = label.to(device)
+                label = label.to(device).squeeze().long()
+
                 logits, _, _ = model(bag)
-                label = label.squeeze().long()
                 pred = torch.argmax(logits, dim=1).item()
+
                 correct += (pred == label.item())
                 total += 1
 
-        print(f"[Epoch {ep+1}] Loss={total_loss/len(train_loader):.4f} | Val Acc={correct/total:.4f}")
+        val_acc = correct / total
 
-    save_path = "/home/jycha/HTF/model.pth"
+        print(f"[Epoch {ep+1}] Loss={total_loss/len(train_loader):.4f} | Val Acc={val_acc:.4f}")
+
+    save_path = "/home/brainlab/Workspace/jycha/HTF/model.pth"
     torch.save(model.state_dict(), save_path)
     print(f"[Saved] {save_path}")
 
@@ -231,8 +242,8 @@ def evaluate_ct_level(model, patch_root, test_ids, device):
     print(" CT-level Evaluation (MIL)")
     print("==========================")
 
-    nii_root = "/data/Cloud-basic/shared/Dataset/HTF/nifti_masked"
-    save_dir = "/home/jycha/HTF/plot"
+    nii_root = "/home/brainlab/Workspace/jycha/HTF/nifti_masked"
+    save_dir = "/home/brainlab/Workspace/jycha/HTF/plot"
 
     for ct_id in test_ids:
         ct_dir = os.path.join(patch_root, ct_id)

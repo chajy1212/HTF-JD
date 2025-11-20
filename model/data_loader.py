@@ -30,7 +30,7 @@ def load_label_dict(excel_path):
 class BagDataset(Dataset):
     def __init__(self, root_dir, ct_ids, label_dict):
         """
-        root_dir: /home/jycha/HTF/patches
+        root_dir: /home/brainlab/Workspace/jycha/HTF/patches
         ct_ids: CT 단위 리스트 (train, val, test split)
         """
         self.root_dir = root_dir
@@ -83,7 +83,7 @@ class CTPatchDataset(Dataset):
     def __init__(self, ct_dir):
         """
         ct_dir: 하나의 CT 폴더
-               ex) /home/jycha/HTF/patches/000006247/
+               ex) /home/brainlab/Workspace/jycha/HTF/patches/000006247/
         """
         self.ct_dir = ct_dir
         self.files = sorted([f for f in os.listdir(ct_dir) if f.endswith(".npy")])

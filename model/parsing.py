@@ -5,7 +5,7 @@ import numpy as np
 
 
 # === 1) 파일 불러오기 ===
-path = "/data/Cloud-basic/shared/Dataset/HTF/nifti_masked/000020367.nii.gz"
+path = "/home/brainlab/Workspace/jycha/HTF/nifti_masked/000020367.nii.gz"
 img = nib.load(path)
 ct = img.get_fdata()
 hdr = img.header

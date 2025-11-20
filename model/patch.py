@@ -2,7 +2,6 @@
 import os
 import nibabel as nib
 import numpy as np
-import matplotlib.pyplot as plt
 
 
 # ============================================================
@@ -102,13 +101,12 @@ def process_ct_file(path, patch_save_root):
 # ============================================================
 if __name__ == "__main__":
 
-    data_dir = "/data/Cloud-basic/shared/Dataset/HTF/nifti_masked"
-    patch_save_root = "/home/jycha/HTF/patches"
+    data_dir = "/home/brainlab/Workspace/jycha/HTF/nifti_masked"
+    patch_save_root = "/home/brainlab/Workspace/jycha/HTF/patches"
 
     nii_files = sorted([f for f in os.listdir(data_dir) if f.endswith(".nii.gz")])
 
     print(f"Total NIfTI files: {len(nii_files)}")
-    print("Processing first 10 files...\n")
 
     for fname in nii_files:
         fpath = os.path.join(data_dir, fname)
