@@ -96,7 +96,7 @@ def train_model():
     train_loader = DataLoader(train_ds, batch_size=1, shuffle=True)
     val_loader   = DataLoader(val_ds, batch_size=1, shuffle=False)
 
-    print(f"[BagDataset] Train bags: {len(train_ds)}")
+    print(f"\n[BagDataset] Train bags: {len(train_ds)}")
     print(f"[BagDataset] Val bags:   {len(val_ds)}")
 
     # Model
@@ -112,12 +112,14 @@ def train_model():
         total_loss = 0
 
         for bag, label, _ in train_loader:
-            bag = bag.to(device)               # (1, N, 1, 64, 64) → (N,1,64,64)
-            bag = bag.squeeze(0)
+            bag = bag.to(device).squeeze(0)
             label = label.to(device)
+
+            label = label.squeeze().long()
 
             optimizer.zero_grad()
             logits, feats, bag_feat = model(bag)
+
             loss = loss_fn(logits, label.unsqueeze(0))
             loss.backward()
             optimizer.step()
@@ -133,6 +135,7 @@ def train_model():
                 bag = bag.to(device).squeeze(0)
                 label = label.to(device)
                 logits, _, _ = model(bag)
+                label = label.squeeze().long()
                 pred = torch.argmax(logits, dim=1).item()
                 correct += (pred == label.item())
                 total += 1
