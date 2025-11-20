@@ -1,20 +1,26 @@
+# -*- coding:utf-8 -*-
 import nibabel as nib
 import matplotlib.pyplot as plt
 import numpy as np
 
+
 # === 1) 파일 불러오기 ===
-path = "/data/Cloud-basic/shared/Dataset/HTF/nifti_masked/000000507.nii.gz"   # 너의 CT 파일
+path = "/data/Cloud-basic/shared/Dataset/HTF/nifti_masked/000020367.nii.gz"
 img = nib.load(path)
 ct = img.get_fdata()
+hdr = img.header
 
-print("CT shape:", ct.shape)  # (512,512,30)
+print(hdr)
+print("\nmin:", np.min(ct))
+print("max:", np.max(ct))
 
 
 # === 2) z축 절반 위치 슬라이스 선택 ===
 z = ct.shape[2] // 2
 slice2d = ct[:, :, z]
 
-print("Selected slice shape:", slice2d.shape)
+print("\nCT shape:", ct.shape)
+print("\nSelected slice shape:", slice2d.shape)
 
 
 # === 3) 시각화 ===
