@@ -228,8 +228,12 @@ def visualize_ct_prediction(model, ct_id, patch_root, nii_root, device, save_dir
             patches_list.append(patch)
             coords.append((y, x))
 
-    patches_tensor = torch.tensor(patches_list, dtype=torch.float32).unsqueeze(1).to(device)
+    patches_np = np.stack(patches_list, axis=0)
+    patches_tensor = torch.tensor(patches_np, dtype=torch.float32).unsqueeze(1).to(device)
+
     logits, feats, _ = model(patches_tensor)
+
+    feats = feats.detach()
     ct_pred = torch.argmax(logits, dim=1).item()
 
     # feat-norm heatmap
