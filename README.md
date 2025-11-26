@@ -38,3 +38,10 @@ CT (bag)
 <br/>→ Classifier → CT-level prediction
 <br/>→ CrossEntropyLoss(CT label)
 <br/>→ Backprop → Attention + CNN encoder 모두 업데이트
+
+## 성능 결과
+- patch_size = 64, stride = 32 + 값이 전부 0인 patch는 filtering, MLP + epoch 50 + split 70:15:15
+  - (split 70:15:15) AutoMIL : 0.5752 (Best : 0.5841, epoch 42)
+  - (split 60:20:20) AutoMIL : 0.5695 (Best : 0.6060, epoch 16)
+ 
+ 
