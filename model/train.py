@@ -113,7 +113,7 @@ def train_model():
     print("\n[Split]")
     print(" Train:", len(train_ids))
     print(" Val  :", len(val_ids))
-    print(" Test :", len(test_ids))
+    print(" Test :", len(test_ids), "\n")
 
     # Dataset
     train_ds = BagDataset(patch_root, train_ids, label_dict)
@@ -195,7 +195,7 @@ def train_model():
             f"[Epoch {ep+1}] "
             f"Loss={total_loss/len(train_loader):.4f} | "
             f"Val Acc={val_acc:.4f} | "
-            f"Best={best_acc:.4f} (ep {best_epoch})"
+            f"Best={best_acc:.4f} (epoch {best_epoch})"
         )
 
     # ========================================================
