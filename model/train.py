@@ -21,15 +21,15 @@ class PatchEncoder(nn.Module):
         self.conv = nn.Sequential(
             nn.Conv2d(1, 16, 3, padding=1),
             nn.ReLU(),
-            nn.MaxPool2d(2),      # 64 → 32
+            nn.MaxPool2d(2),   # 64 → 32
 
             nn.Conv2d(16, 32, 3, padding=1),
             nn.ReLU(),
-            nn.MaxPool2d(2),      # 32 → 16
+            nn.MaxPool2d(2),   # 32 → 16
 
             nn.Conv2d(32, 64, 3, padding=1),
             nn.ReLU(),
-            nn.MaxPool2d(2),      # 16 → 8
+            nn.MaxPool2d(2),   # 16 → 8
         )
 
         self.fc = nn.Sequential(
@@ -41,31 +41,28 @@ class PatchEncoder(nn.Module):
     def forward(self, x):
         x = self.conv(x)
         x = self.fc(x)
-        return x   # (B, feat_dim)
+        return x
 
 
 # ============================================================
-# 2) Attention-MIL Classifier
+# 2) Attention-MIL Model
 # ============================================================
 class AttentionMIL(nn.Module):
     def __init__(self, feat_dim=128, hidden_dim=64, num_classes=2):
         super().__init__()
 
-        # CNN Encoder
         self.encoder = PatchEncoder(feat_dim)
 
-        # Attention module
         self.att_V = nn.Linear(feat_dim, hidden_dim)
         self.att_U = nn.Linear(hidden_dim, 1)
 
-        # Final classifier
         self.classifier = nn.Linear(feat_dim, num_classes)
 
     def forward(self, bag, batch_size=64):
         all_feats = []
         N = bag.size(0)
 
-        # Mini-batch encoding
+        # Patch-level mini-batch inference
         for i in range(0, N, batch_size):
             batch = bag[i:i+batch_size]
             f = self.encoder(batch)
@@ -73,14 +70,15 @@ class AttentionMIL(nn.Module):
 
         feats = torch.cat(all_feats, dim=0)     # (N, feat_dim)
 
-        # Attention score
-        A = torch.tanh(self.att_V(feats))       # (N, hidden)
-        A = self.att_U(A)                       # (N, 1)
-        A = torch.softmax(A.squeeze(1), dim=0)  # (N)
+        # Attention (score for each patch)
+        A = torch.tanh(self.att_V(feats))
+        A = self.att_U(A)
+        A = torch.softmax(A.squeeze(1), dim=0)
 
-        # Bag representation
+        # Bag feature
         bag_feat = torch.sum(feats * A.unsqueeze(1), dim=0)
 
+        # CT-level prediction
         logits = self.classifier(bag_feat.unsqueeze(0))
 
         return logits, feats, bag_feat, A
@@ -98,7 +96,7 @@ def train_model():
 
     patch_root = "/home/brainlab/Workspace/jycha/HTF/patches"
 
-    # Load CT folders
+    # Load CT IDs
     ct_ids = sorted([
         d for d in os.listdir(patch_root)
         if os.path.isdir(os.path.join(patch_root, d)) and d in label_dict
@@ -107,10 +105,10 @@ def train_model():
     n = len(ct_ids)
     print(f"[Total CT] {n}")
 
-    # 70/15/15 split
-    train_ids = ct_ids[:int(n * 0.70)]
-    val_ids   = ct_ids[int(n * 0.70):int(n * 0.85)]
-    test_ids  = ct_ids[int(n * 0.85):]
+    # Split
+    train_ids = ct_ids[:int(n * 0.60)]
+    val_ids   = ct_ids[int(n * 0.60):int(n * 0.80)]
+    test_ids  = ct_ids[int(n * 0.80):]
 
     print("\n[Split]")
     print(" Train:", len(train_ids))
@@ -124,22 +122,29 @@ def train_model():
     train_loader = DataLoader(train_ds, batch_size=1, shuffle=True)
     val_loader   = DataLoader(val_ds, batch_size=1, shuffle=False)
 
-    print(f"\n[BagDataset] Train bags: {len(train_ds)}")
-    print(f"[BagDataset] Val bags:   {len(val_ds)}\n")
-
     # Model
     model = AttentionMIL().to(device)
     optimizer = optim.Adam(model.parameters(), lr=1e-4)
     loss_fn = nn.CrossEntropyLoss()
 
+    # Training Config
     epochs = 200
     accumulation_steps = 4
 
+    # Best Acc Tracking
+    best_acc = 0
+    best_epoch = 0
+    best_state = None
+
+    # ========================================================
+    # Training Loop
+    # ========================================================
     for ep in range(epochs):
         model.train()
         total_loss = 0
         optimizer.zero_grad()
 
+        # Train
         for step, (bag, label, _) in enumerate(train_loader):
             bag = bag.to(device).squeeze(0)
             label = label.to(device).squeeze().long()
@@ -152,18 +157,21 @@ def train_model():
             loss = raw_loss / accumulation_steps
             loss.backward()
 
-            if (step+1) % accumulation_steps == 0:
+            if (step + 1) % accumulation_steps == 0:
                 optimizer.step()
                 optimizer.zero_grad()
 
-        if (step+1) % accumulation_steps != 0:
+        # 마지막 step 누락된 경우
+        if (step + 1) % accumulation_steps != 0:
             optimizer.step()
             optimizer.zero_grad()
 
+        # ====================================================
         # Validation
+        # ====================================================
         model.eval()
-        correct = 0
-        total = 0
+        correct, total = 0, 0
+
         with torch.no_grad():
             for bag, label, _ in val_loader:
                 bag = bag.to(device).squeeze(0)
@@ -177,25 +185,33 @@ def train_model():
 
         val_acc = correct / total
 
-        print(f"[Epoch {ep+1}] Loss={total_loss/len(train_loader):.4f} | Val Acc={val_acc:.4f}")
+        # Best model 저장
+        if val_acc > best_acc:
+            best_acc = val_acc
+            best_epoch = ep + 1
+            best_state = model.state_dict()
 
-    save_path = "/home/brainlab/Workspace/jycha/HTF/model.pth"
-    torch.save(model.state_dict(), save_path)
-    print(f"[Saved] {save_path}")
+        print(
+            f"[Epoch {ep+1}] "
+            f"Loss={total_loss/len(train_loader):.4f} | "
+            f"Val Acc={val_acc:.4f} | "
+            f"Best={best_acc:.4f} (ep {best_epoch})"
+        )
+
+    # ========================================================
+    # Save Best Model
+    # ========================================================
+    best_path = "/home/brainlab/Workspace/jycha/HTF/best_model.pth"
+    torch.save(best_state, best_path)
+    print(f"[BEST MODEL SAVED] {best_path}")
 
     return model, test_ids, patch_root, device
 
 
 # ============================================================
-# 4) Patch-level Visualization
+# 4) Visualization
 # ============================================================
 def visualize_ct_prediction(model, ct_id, patch_root, nii_root, device, save_dir):
-    """
-    (1) patch 위치 표시
-    (2) patch 예측값 표시
-    (3) heatmap overlay
-    (4) CT-level 최종 결과까지 표시
-    """
     nii_path = os.path.join(nii_root, f"{ct_id}.nii.gz")
     img = nib.load(nii_path)
     vol = img.get_fdata()
@@ -225,34 +241,32 @@ def visualize_ct_prediction(model, ct_id, patch_root, nii_root, device, save_dir
             patches_list.append(patch)
             coords.append((y, x))
 
-    patches_np = np.stack(patches_list)
-    patches_tensor = torch.tensor(patches_np, dtype=torch.float32).unsqueeze(1).to(device)
+    patches_tensor = torch.tensor(np.stack(patches_list), dtype=torch.float32).unsqueeze(1).to(device)
 
     logits, feats, bag_feat, att = model(patches_tensor)
 
-    att = att.cpu().numpy()
+    att = att.detach().cpu().numpy()
     ct_pred = torch.argmax(logits, dim=1).item()
 
-    # heatmap
     heatmap = np.zeros_like(slice_img)
     countmap = np.zeros_like(slice_img)
 
     for (y, x), score in zip(coords, att):
-        heatmap[y:y + 64, x:x + 64] += score
-        countmap[y:y + 64, x:x + 64] += 1
+        heatmap[y:y+64, x:x+64] += score
+        countmap[y:y+64, x:x+64] += 1
 
     mask = countmap > 0
     final_map = np.zeros_like(heatmap)
     final_map[mask] = heatmap[mask] / countmap[mask]
 
     fig, ax = plt.subplots(figsize=(8, 8))
-    ax.imshow(slice_img, cmap='gray')
-    ax.imshow(final_map, cmap='jet', alpha=0.35)
+    ax.imshow(slice_img, cmap="gray")
+    ax.imshow(final_map, cmap="jet", alpha=0.35)
     ax.set_title(f"CT {ct_id} — Pred: {ct_pred}")
-    ax.axis('off')
+    ax.axis("off")
 
     save_path = os.path.join(save_dir, f"{ct_id}_viz.png")
-    plt.savefig(save_path, dpi=150, bbox_inches='tight')
+    plt.savefig(save_path, dpi=150, bbox_inches="tight")
     plt.close()
 
     print(f"[Saved] {save_path}")
@@ -277,7 +291,6 @@ def evaluate_ct_level(model, patch_root, test_ids, device):
         patches = []
         for p, _ in loader:
             patches.append(p)
-
         patches = torch.cat(patches, dim=0).to(device)
 
         with torch.no_grad():
