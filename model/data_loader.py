@@ -1,136 +1,115 @@
 # -*- coding:utf-8 -*-
 import os
 import numpy as np
+import nibabel as nib
 import torch
-from torch.utils.data import Dataset
-import pandas as pd
+from torch.utils.data import Dataset, DataLoader
 
 
 # ============================================================
-# 1) Excel → Label Dict 로딩 함수
+# 1) Slice → Patchify
 # ============================================================
-def load_label_dict(excel_path):
-    df = pd.read_excel(excel_path)
+def create_patches_from_slice(slice_img, patch_size=64, stride=32, fg_ratio=0.05):
+    H, W = slice_img.shape
+    patches = []
 
-    # hosp_id → 문자열 9자리로 맞추기
-    label_dict = {
-        str(row["hosp_id"]).zfill(9): int(row["HTf"])
-        for _, row in df.iterrows()
-    }
+    min_fg_pixels = int(patch_size * patch_size * fg_ratio)
 
-    print(f"[Label Loaded] {len(label_dict)} CT labels")
-    return label_dict
+    for y in range(0, H - patch_size + 1, stride):
+        for x in range(0, W - patch_size + 1, stride):
+            patch = slice_img[y:y + patch_size, x:x + patch_size]
 
-
-
-# ============================================================
-# 2) 배경 패치 제거 기준 함수
-# ============================================================
-def is_background(patch, thr_nonzero=0.05, thr_mean=-800):
-    """
-    patch: (H, W)
-    - thr_nonzero: non-zero 비율이 너무 낮으면 배경으로 판정
-    - thr_mean: 평균 intensity가 극도로 낮으면 (공기값) 배경으로 판정
-    """
-    nonzero_ratio = np.count_nonzero(patch) / patch.size
-    if nonzero_ratio < thr_nonzero:
-        return True
-
-    if patch.mean() < thr_mean:
-        return True
-
-    return False
-
-
-# ============================================================
-# 3) BagDataset (CT 별 모든 patch → 하나의 bag)
-# ============================================================
-class BagDataset(Dataset):
-    def __init__(self, root_dir, ct_ids, label_dict):
-        """
-        root_dir: /home/brainlab/Workspace/jycha/HTF/patches
-        ct_ids: CT 폴더명 리스트 (train, val, test split)
-        """
-        self.root_dir = root_dir
-        self.ct_ids = [
-            ct for ct in ct_ids
-            if os.path.isdir(os.path.join(root_dir, ct))
-        ]
-        self.label_dict = label_dict
-
-    def __len__(self):
-        return len(self.ct_ids)
-
-    def __getitem__(self, idx):
-        ct_id = self.ct_ids[idx]
-        ct_dir = os.path.join(self.root_dir, ct_id)
-        label = self.label_dict[ct_id]
-
-        patch_files = sorted([f for f in os.listdir(ct_dir) if f.endswith(".npy")])
-
-        patches = []
-
-        for fname in patch_files:
-            patch = np.load(os.path.join(ct_dir, fname)).astype(np.float32)
-
-            # -------------------------------
-            # (A) 배경 패치 제거
-            # -------------------------------
-            if is_background(patch):
+            # foreground filtering
+            if np.sum(patch > 0) < min_fg_pixels:
                 continue
 
-            # -------------------------------
-            # (B) Normalize
-            # -------------------------------
-            patch = (patch - patch.mean()) / (patch.std() + 1e-6)
-            patch = patch[None, :, :]  # (1, H, W)
             patches.append(patch)
 
-        # -------------------------------
-        # (C) 모든 패치 제거된 경우 → 오류
-        # -------------------------------
-        if len(patches) == 0:
-            raise RuntimeError(f"[ERROR] No valid patches remain after filtering in {ct_dir}")
-
-        patches = np.stack(patches, axis=0)  # (N, 1, H, W)
-        patches = torch.tensor(patches, dtype=torch.float32)
-
-        return patches, torch.tensor(label, dtype=torch.long), ct_id
+    return patches
 
 
 # ============================================================
-# 4) Inference용 Dataset — 배경 패치 제거 포함
+# 2) Full CT volume → slice → patchify
 # ============================================================
-class CTPatchDataset(Dataset):
-    def __init__(self, ct_dir):
-        """
-        ct_dir: /.../patches/000006247/
-        """
-        self.ct_dir = ct_dir
-        self.files = sorted([f for f in os.listdir(ct_dir) if f.endswith(".npy")])
+def volume_to_patches(volume, patch_size=64, stride=32, fg_ratio=0.05):
+    H, W, Z = volume.shape
+    all_patches = []
+
+    for z in range(Z):
+        slice_img = volume[:, :, z]
+
+        # skip empty slices
+        if np.sum(slice_img > 0) < patch_size * patch_size * fg_ratio:
+            continue
+
+        patches = create_patches_from_slice(
+            slice_img,
+            patch_size=patch_size,
+            stride=stride,
+            fg_ratio=fg_ratio
+        )
+
+        all_patches.extend(patches)
+
+    return all_patches  # list of (64×64) patches
+
+
+# ============================================================
+# 3) Dataset for MAE SSL
+# ============================================================
+class CTMAEDataset(Dataset):
+    def __init__(self, nii_root, ct_id_list, patch_size=64, stride=32, fg_ratio=0.05):
+        self.nii_root = nii_root
+        self.ct_id_list = ct_id_list
+        self.patch_size = patch_size
+        self.stride = stride
+        self.fg_ratio = fg_ratio
+
+        print(f"[Dataset Init] Loading CT volumes & patchifying...")
+        self.patch_list = []   # will store all patches (as numpy)
+
+        for ct_id in ct_id_list:
+            nii_path = os.path.join(nii_root, f"{ct_id}.nii.gz")
+            vol = nib.load(nii_path).get_fdata()
+
+            patches = volume_to_patches(
+                vol,
+                patch_size=self.patch_size,
+                stride=self.stride,
+                fg_ratio=self.fg_ratio
+            )
+
+            self.patch_list.extend(patches)
+
+        print(f"[Total patches loaded] {len(self.patch_list)}")
+
 
     def __len__(self):
-        return len(self.files)
+        return len(self.patch_list)
 
     def __getitem__(self, idx):
-        fname = self.files[idx]
-        fpath = os.path.join(self.ct_dir, fname)
+        patch = self.patch_list[idx].astype(np.float32)
 
-        patch = np.load(fpath).astype(np.float32)
-
-        # -------------------------------
-        # (A) inference에서도 배경 patch 제외
-        # -------------------------------
-        if is_background(patch):
-            # dummy patch라도 반환 (시각화에서 스킵 가능)
-            patch = np.zeros_like(patch)
-
-        # -------------------------------
-        # (B) Normalize
-        # -------------------------------
+        # normalize
         patch = (patch - patch.mean()) / (patch.std() + 1e-6)
-        patch = np.expand_dims(patch, axis=0)
 
-        patch = torch.tensor(patch, dtype=torch.float32)
+        # shape: (1, 64, 64)
+        return torch.tensor(patch).unsqueeze(0)
 
-        return patch, fname
+
+# ============================================================
+# Helper: make loaders
+# ============================================================
+def make_mae_dataloaders(nii_root, all_ct_ids, batch_size=64):
+    # train 80% / val 20%
+    n = len(all_ct_ids)
+    train_ids = all_ct_ids[:int(n * 0.8)]
+    val_ids   = all_ct_ids[int(n * 0.8):]
+
+    train_ds = CTMAEDataset(nii_root, train_ids)
+    val_ds   = CTMAEDataset(nii_root, val_ids)
+
+    train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True, drop_last=True)
+    val_loader   = DataLoader(val_ds, batch_size=batch_size, shuffle=False)
+
+    return train_loader, val_loader

@@ -1,310 +1,212 @@
 # -*- coding:utf-8 -*-
-import os, re
+import os
+import random
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader
-import numpy as np
-import nibabel as nib
 import matplotlib.pyplot as plt
 
-from data_loader import load_label_dict, BagDataset, CTPatchDataset
+from data_loader import make_mae_dataloaders
+from model import MaskedAutoencoderViT
 
 
 # ============================================================
-# 1) CNN patch encoder
+# Seed (Reproducibility)
 # ============================================================
-class PatchEncoder(nn.Module):
-    def __init__(self, feat_dim=128):
-        super().__init__()
-
-        self.conv = nn.Sequential(
-            nn.Conv2d(1, 16, 3, padding=1),
-            nn.ReLU(),
-            nn.MaxPool2d(2),   # 64 → 32
-
-            nn.Conv2d(16, 32, 3, padding=1),
-            nn.ReLU(),
-            nn.MaxPool2d(2),   # 32 → 16
-
-            nn.Conv2d(32, 64, 3, padding=1),
-            nn.ReLU(),
-            nn.MaxPool2d(2),   # 16 → 8
-        )
-
-        self.fc = nn.Sequential(
-            nn.Flatten(),
-            nn.Linear(64 * 8 * 8, feat_dim),
-            nn.ReLU()
-        )
-
-    def forward(self, x):
-        x = self.conv(x)
-        x = self.fc(x)
-        return x
+def set_seed(seed=777):
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    random.seed(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
 
 
 # ============================================================
-# 2) Attention-MIL Model
+# Config
 # ============================================================
-class AttentionMIL(nn.Module):
-    def __init__(self, feat_dim=128, hidden_dim=64, num_classes=2):
-        super().__init__()
+class Config:
+    image_size = 64          # input patch size
+    patch_size = 8           # patchify size
+    mask_ratio = 0.75
+    embed_dim = 256
+    depth = 6
+    num_heads = 8
+    mlp_ratio = 4.0
 
-        self.encoder = PatchEncoder(feat_dim)
+    batch_size = 64
+    num_epochs = 200
+    lr = 1e-4
 
-        self.att_V = nn.Linear(feat_dim, hidden_dim)
-        self.att_U = nn.Linear(hidden_dim, 1)
-
-        self.classifier = nn.Linear(feat_dim, num_classes)
-
-    def forward(self, bag, batch_size=64):
-        all_feats = []
-        N = bag.size(0)
-
-        # Patch-level mini-batch inference
-        for i in range(0, N, batch_size):
-            batch = bag[i:i+batch_size]
-            f = self.encoder(batch)
-            all_feats.append(f)
-
-        feats = torch.cat(all_feats, dim=0)     # (N, feat_dim)
-
-        # Attention (score for each patch)
-        A = torch.tanh(self.att_V(feats))
-        A = self.att_U(A)
-        A = torch.softmax(A.squeeze(1), dim=0)
-
-        # Bag feature
-        bag_feat = torch.sum(feats * A.unsqueeze(1), dim=0)
-
-        # CT-level prediction
-        logits = self.classifier(bag_feat.unsqueeze(0))
-
-        return logits, feats, bag_feat, A
+    data_root = "/home/brainlab/Workspace/jycha/HTF/nifti_masked"
+    save_path = "/home/brainlab/Workspace/jycha/HTF/model.pth"
+    vis_dir = "/home/brainlab/Workspace/jycha/HTF/plot"
 
 
 # ============================================================
-# 3) Train Loop
+# MAE Loss (pixel-wise L2)
 # ============================================================
-def train_model():
+def mae_loss(pred, target, mask):
+    """
+    pred   : (B, L, patch_dim)
+    target : (B, L, patch_dim)
+    mask   : (B, L)
+    """
+    loss = (pred - target) ** 2
+    loss = loss.mean(dim=-1)   # patch-wise MSE
+    loss = (loss * mask).sum() / mask.sum()
+    return loss
+
+
+# ============================================================
+# Visualization (input / mask / reconstruction)
+# ============================================================
+def visualize(img, pred, mask, cfg, save_name):
+    """
+    img  : (1, 64, 64)
+    pred : (L, patch_dim)
+    mask : (L)
+    """
+
+    img = img[0].detach().cpu().numpy()
+    p = cfg.patch_size
+
+    # ----- masked target patch map -----
+    mask = mask.detach().cpu().numpy()  # (L,)
+    h = w = int((mask.shape[0]) ** 0.5)
+    mask_2d = mask.reshape(h, w)
+
+    # ----- reconstruction -----
+    pred = pred.detach().cpu().numpy()  # (L, patch_dim)
+    patches = pred.reshape(h, w, p, p)
+    rec_img = np.block([[patches[i, j] for j in range(w)] for i in range(h)])
+
+    # ----- plot -----
+    fig, ax = plt.subplots(1, 3, figsize=(12, 4))
+
+    ax[0].imshow(img, cmap="gray")
+    ax[0].set_title("Original")
+    ax[0].axis("off")
+
+    ax[1].imshow(mask_2d, cmap="gray")
+    ax[1].set_title("Mask Map")
+    ax[1].axis("off")
+
+    ax[2].imshow(rec_img, cmap="gray")
+    ax[2].set_title("Reconstruction")
+    ax[2].axis("off")
+
+    plt.tight_layout()
+    plt.savefig(save_name)
+    plt.show()
+    plt.close()
+
+
+# ============================================================
+# MAE Training Code
+# ============================================================
+def train_mae():
+    set_seed(777)
+    cfg = Config()
+
+    os.makedirs(cfg.vis_dir, exist_ok=True)
+
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"[Device] {device}")
 
-    excel_path = "/home/brainlab/Workspace/jycha/HTF/patient_whole_add.xlsx"
-    label_dict = load_label_dict(excel_path)
-
-    patch_root = "/home/brainlab/Workspace/jycha/HTF/patches"
-
-    # Load CT IDs
-    ct_ids = sorted([
-        d for d in os.listdir(patch_root)
-        if os.path.isdir(os.path.join(patch_root, d)) and d in label_dict
+    # --------------------------------------------------------
+    # Load Dataset
+    # --------------------------------------------------------
+    all_ct_ids = sorted([
+        f.replace(".nii.gz", "")
+        for f in os.listdir(cfg.data_root)
+        if f.endswith(".nii.gz")
     ])
 
-    n = len(ct_ids)
-    print(f"[Total CT] {n}")
+    train_loader, val_loader = make_mae_dataloaders(
+        cfg.data_root, all_ct_ids, batch_size=cfg.batch_size
+    )
 
-    # Split
-    train_ids = ct_ids[:int(n * 0.60)]
-    val_ids   = ct_ids[int(n * 0.60):int(n * 0.80)]
-    test_ids  = ct_ids[int(n * 0.80):]
-
-    print("\n[Split]")
-    print(" Train:", len(train_ids))
-    print(" Val  :", len(val_ids))
-    print(" Test :", len(test_ids), "\n")
-
-    # Dataset
-    train_ds = BagDataset(patch_root, train_ids, label_dict)
-    val_ds   = BagDataset(patch_root, val_ids, label_dict)
-
-    train_loader = DataLoader(train_ds, batch_size=1, shuffle=True)
-    val_loader   = DataLoader(val_ds, batch_size=1, shuffle=False)
-
+    # --------------------------------------------------------
     # Model
-    model = AttentionMIL().to(device)
-    optimizer = optim.Adam(model.parameters(), lr=1e-4)
-    loss_fn = nn.CrossEntropyLoss()
+    # --------------------------------------------------------
+    model = MaskedAutoencoderViT(
+        img_size=cfg.image_size,
+        patch_size=cfg.patch_size,
+        embed_dim=cfg.embed_dim,
+        depth=cfg.depth,
+        num_heads=cfg.num_heads,
+        mlp_ratio=cfg.mlp_ratio
+    ).to(device)
 
-    # Training Config
-    epochs = 200
-    accumulation_steps = 4
+    optimizer = optim.Adam(model.parameters(), lr=cfg.lr)
 
-    # Best Acc Tracking
-    best_acc = 0
-    best_epoch = 0
-    best_state = None
+    print("\n[Model Created]")
+    print(model)
 
-    # ========================================================
-    # Training Loop
-    # ========================================================
-    for ep in range(epochs):
+
+    # --------------------------------------------------------
+    # Train
+    # --------------------------------------------------------
+    best_val_loss = 999
+
+    for epoch in range(cfg.num_epochs):
         model.train()
         total_loss = 0
-        optimizer.zero_grad()
 
-        # Train
-        for step, (bag, label, _) in enumerate(train_loader):
-            bag = bag.to(device).squeeze(0)
-            label = label.to(device).squeeze().long()
+        for img in train_loader:
+            img = img.to(device)  # (B, 1, 64, 64)
+            loss, pred, mask = model(img, mask_ratio=cfg.mask_ratio)
 
-            logits, _, _, _ = model(bag)
-
-            raw_loss = loss_fn(logits, label.unsqueeze(0))
-            total_loss += raw_loss.item()
-
-            loss = raw_loss / accumulation_steps
-            loss.backward()
-
-            if (step + 1) % accumulation_steps == 0:
-                optimizer.step()
-                optimizer.zero_grad()
-
-        # 마지막 step 누락된 경우
-        if (step + 1) % accumulation_steps != 0:
-            optimizer.step()
             optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
 
-        # ====================================================
+            total_loss += loss.item()
+
+        train_loss = total_loss / len(train_loader)
+
+        # ----------------------------------------------------
         # Validation
-        # ====================================================
+        # ----------------------------------------------------
         model.eval()
-        correct, total = 0, 0
+        val_total = 0
 
         with torch.no_grad():
-            for bag, label, _ in val_loader:
-                bag = bag.to(device).squeeze(0)
-                label = label.to(device).squeeze().long()
+            for img in val_loader:
+                img = img.to(device)
+                loss, _, _ = model(img, mask_ratio=cfg.mask_ratio)
+                val_total += loss.item()
 
-                logits, _, _, _ = model(bag)
-                pred = torch.argmax(logits, dim=1).item()
+        val_loss = val_total / len(val_loader)
 
-                correct += (pred == label.item())
-                total += 1
+        print(f"[Epoch {epoch+1:03d}] Train={train_loss:.4f} | Val={val_loss:.4f}")
 
-        val_acc = correct / total
+        # ----------------------------------------------------
+        # Save Best
+        # ----------------------------------------------------
+        if val_loss < best_val_loss:
+            best_val_loss = val_loss
+            torch.save(model.state_dict(), cfg.save_path)
+            print(f"[BEST SAVED] epoch={epoch+1} | val_loss={val_loss:.4f}")
 
-        # Best model 저장
-        if val_acc > best_acc:
-            best_acc = val_acc
-            best_epoch = ep + 1
-            best_state = model.state_dict()
-
-        print(
-            f"[Epoch {ep+1}] "
-            f"Loss={total_loss/len(train_loader):.4f} | "
-            f"Val Acc={val_acc:.4f} | "
-            f"Best={best_acc:.4f} (epoch {best_epoch})"
-        )
-
-    # ========================================================
-    # Save Best Model
-    # ========================================================
-    best_path = "/home/brainlab/Workspace/jycha/HTF/best_model.pth"
-    torch.save(best_state, best_path)
-    print(f"[BEST MODEL SAVED] {best_path}")
-
-    return model, test_ids, patch_root, device
-
-
-# ============================================================
-# 4) Visualization
-# ============================================================
-def visualize_ct_prediction(model, ct_id, patch_root, nii_root, device, save_dir):
-    nii_path = os.path.join(nii_root, f"{ct_id}.nii.gz")
-    img = nib.load(nii_path)
-    vol = img.get_fdata()
-
-    z_mid = vol.shape[2] // 2
-    slice_img = vol[:, :, z_mid]
-
-    ct_dir = os.path.join(patch_root, ct_id)
-    patch_files = sorted([f for f in os.listdir(ct_dir) if f.endswith(".npy")])
-
-    patches_list = []
-    coords = []
-
-    with torch.no_grad():
-        for fname in patch_files:
-            m = re.search(r"_z(\d+)_y(\d+)_x(\d+)_p", fname)
-            if m is None:
-                continue
-
-            z, y, x = map(int, m.groups())
-            if z != z_mid:
-                continue
-
-            patch = np.load(os.path.join(ct_dir, fname)).astype(np.float32)
-            patch = (patch - patch.mean()) / (patch.std() + 1e-6)
-
-            patches_list.append(patch)
-            coords.append((y, x))
-
-    patches_tensor = torch.tensor(np.stack(patches_list), dtype=torch.float32).unsqueeze(1).to(device)
-
-    logits, feats, bag_feat, att = model(patches_tensor)
-
-    att = att.detach().cpu().numpy()
-    ct_pred = torch.argmax(logits, dim=1).item()
-
-    heatmap = np.zeros_like(slice_img)
-    countmap = np.zeros_like(slice_img)
-
-    for (y, x), score in zip(coords, att):
-        heatmap[y:y+64, x:x+64] += score
-        countmap[y:y+64, x:x+64] += 1
-
-    mask = countmap > 0
-    final_map = np.zeros_like(heatmap)
-    final_map[mask] = heatmap[mask] / countmap[mask]
-
-    fig, ax = plt.subplots(figsize=(8, 8))
-    ax.imshow(slice_img, cmap="gray")
-    ax.imshow(final_map, cmap="jet", alpha=0.35)
-    ax.set_title(f"CT {ct_id} — Pred: {ct_pred}")
-    ax.axis("off")
-
-    save_path = os.path.join(save_dir, f"{ct_id}_viz.png")
-    plt.savefig(save_path, dpi=150, bbox_inches="tight")
-    plt.close()
-
-    print(f"[Saved] {save_path}")
-
-
-# ============================================================
-# 5) Evaluation
-# ============================================================
-def evaluate_ct_level(model, patch_root, test_ids, device):
-    print("\n==========================")
-    print(" CT-level Evaluation (MIL)")
-    print("==========================")
-
-    nii_root = "/home/brainlab/Workspace/jycha/HTF/nifti_masked"
-    save_dir = "/home/brainlab/Workspace/jycha/HTF/plot"
-
-    for ct_id in test_ids:
-        ct_dir = os.path.join(patch_root, ct_id)
-        dataset = CTPatchDataset(ct_dir)
-        loader = DataLoader(dataset, batch_size=64, shuffle=False)
-
-        patches = []
-        for p, _ in loader:
-            patches.append(p)
-        patches = torch.cat(patches, dim=0).to(device)
-
+        # ----------------------------------------------------
+        # Visualization (only first batch of val set)
+        # ----------------------------------------------------
         with torch.no_grad():
-            logits, feats, bag_feat, att = model(patches)
-            pred = torch.argmax(logits, dim=1).item()
+            img = next(iter(val_loader)).to(device)
+            _, pred, mask = model(img, mask_ratio=cfg.mask_ratio)
 
-        print(f"CT {ct_id} → Pred label: {pred}")
+            vis_path = os.path.join(cfg.vis_dir, f"epoch_{epoch+1}.png")
+            visualize(img[0], pred[0], mask[0], cfg, vis_path)
+            print(f"[VIS SAVED] {vis_path}")
 
-        visualize_ct_prediction(model, ct_id, patch_root, nii_root, device, save_dir)
+    print(f"\nTraining Done. Best model: {cfg.save_path}")
 
 
 # ============================================================
 # Main
 # ============================================================
 if __name__ == "__main__":
-    model, test_ids, patch_root, device = train_model()
-    evaluate_ct_level(model, patch_root, test_ids, device)
+    train_mae()
