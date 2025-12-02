@@ -3,9 +3,7 @@ import os
 import random
 import numpy as np
 import torch
-import torch.nn as nn
 import torch.optim as optim
-from torch.utils.data import DataLoader
 import matplotlib.pyplot as plt
 
 from data_loader import make_mae_dataloaders
@@ -27,8 +25,8 @@ def set_seed(seed=777):
 # Config
 # ============================================================
 class Config:
-    image_size = 64          # input patch size
-    patch_size = 8           # patchify size
+    image_size = 300          # 최종 입력 크기
+    patch_size = 15           # MAE의 internal patch size
     mask_ratio = 0.75
     embed_dim = 256
     depth = 6
@@ -36,7 +34,8 @@ class Config:
     mlp_ratio = 4.0
 
     batch_size = 64
-    num_epochs = 200
+    accum_steps = 4
+    num_epochs = 3000
     lr = 1e-4
 
     data_root = "/home/brainlab/Workspace/jycha/HTF/nifti_masked"
@@ -45,30 +44,14 @@ class Config:
 
 
 # ============================================================
-# MAE Loss (pixel-wise L2)
-# ============================================================
-def mae_loss(pred, target, mask):
-    """
-    pred   : (B, L, patch_dim)
-    target : (B, L, patch_dim)
-    mask   : (B, L)
-    """
-    loss = (pred - target) ** 2
-    loss = loss.mean(dim=-1)   # patch-wise MSE
-    loss = (loss * mask).sum() / mask.sum()
-    return loss
-
-
-# ============================================================
 # Visualization (input / mask / reconstruction)
 # ============================================================
 def visualize(img, pred, mask, cfg, save_name):
     """
-    img  : (1, 64, 64)
+    img  : (1, 128, 128)
     pred : (L, patch_dim)
     mask : (L)
     """
-
     img = img[0].detach().cpu().numpy()
     p = cfg.patch_size
 
@@ -110,8 +93,6 @@ def train_mae():
     set_seed(777)
     cfg = Config()
 
-    os.makedirs(cfg.vis_dir, exist_ok=True)
-
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"[Device] {device}")
 
@@ -124,8 +105,14 @@ def train_mae():
         if f.endswith(".nii.gz")
     ])
 
+    # --- Quick Test ---
+    all_ct_ids = all_ct_ids[:20]
+    print(f"[Quick Test Mode] Using {len(all_ct_ids)} CT volumes")
+
     train_loader, val_loader = make_mae_dataloaders(
-        cfg.data_root, all_ct_ids, batch_size=cfg.batch_size
+        cfg.data_root,
+        all_ct_ids,
+        batch_size=cfg.batch_size
     )
 
     # --------------------------------------------------------
@@ -155,13 +142,16 @@ def train_mae():
         model.train()
         total_loss = 0
 
-        for img in train_loader:
-            img = img.to(device)  # (B, 1, 64, 64)
-            loss, pred, mask = model(img, mask_ratio=cfg.mask_ratio)
+        for step, img in enumerate(train_loader):
+            img = img.to(device)
 
-            optimizer.zero_grad()
+            loss, pred, mask = model(img, mask_ratio=cfg.mask_ratio)
+            loss = loss / cfg.accum_steps  # loss scaling
             loss.backward()
-            optimizer.step()
+
+            if (step + 1) % cfg.accum_steps == 0:
+                optimizer.step()
+                optimizer.zero_grad()
 
             total_loss += loss.item()
 

@@ -9,7 +9,7 @@ from torch.utils.data import Dataset, DataLoader
 # ============================================================
 # 1) Slice → Patchify
 # ============================================================
-def create_patches_from_slice(slice_img, patch_size=64, stride=32, fg_ratio=0.05):
+def create_patches_from_slice(slice_img, patch_size=512, stride=32, fg_ratio=0.05):
     H, W = slice_img.shape
     patches = []
 
@@ -31,7 +31,7 @@ def create_patches_from_slice(slice_img, patch_size=64, stride=32, fg_ratio=0.05
 # ============================================================
 # 2) Full CT volume → slice → patchify
 # ============================================================
-def volume_to_patches(volume, patch_size=64, stride=32, fg_ratio=0.05):
+def volume_to_patches(volume, patch_size=512, stride=32, fg_ratio=0.05):
     H, W, Z = volume.shape
     all_patches = []
 
@@ -58,7 +58,7 @@ def volume_to_patches(volume, patch_size=64, stride=32, fg_ratio=0.05):
 # 3) Dataset for MAE SSL
 # ============================================================
 class CTMAEDataset(Dataset):
-    def __init__(self, nii_root, ct_id_list, patch_size=64, stride=32, fg_ratio=0.05):
+    def __init__(self, nii_root, ct_id_list, patch_size=512, stride=32, fg_ratio=0.05):
         self.nii_root = nii_root
         self.ct_id_list = ct_id_list
         self.patch_size = patch_size
@@ -93,8 +93,13 @@ class CTMAEDataset(Dataset):
         # normalize
         patch = (patch - patch.mean()) / (patch.std() + 1e-6)
 
-        # shape: (1, 64, 64)
-        return torch.tensor(patch).unsqueeze(0)
+        # ======== Resize from (512,512) → (300,300) ========
+        import torch.nn.functional as F
+        patch = torch.tensor(patch).unsqueeze(0).unsqueeze(0)  # (1,1,H,W)
+        patch = F.interpolate(patch, size=(300, 300), mode="bilinear", align_corners=False)
+        patch = patch.squeeze(0)  # (1,300,300)
+
+        return patch
 
 
 # ============================================================
@@ -103,8 +108,8 @@ class CTMAEDataset(Dataset):
 def make_mae_dataloaders(nii_root, all_ct_ids, batch_size=64):
     # train 80% / val 20%
     n = len(all_ct_ids)
-    train_ids = all_ct_ids[:int(n * 0.8)]
-    val_ids   = all_ct_ids[int(n * 0.8):]
+    train_ids = all_ct_ids[:int(n * 0.7)]
+    val_ids   = all_ct_ids[int(n * 0.7):]
 
     train_ds = CTMAEDataset(nii_root, train_ids)
     val_ds   = CTMAEDataset(nii_root, val_ids)

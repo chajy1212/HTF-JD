@@ -12,8 +12,8 @@ from timm.models.vision_transformer import PatchEmbed, Block
 
 class MaskedAutoencoderViT(nn.Module):
     """ Masked Autoencoder with VisionTransformer backbone for EEG """
-    def __init__(self, img_size=64, patch_size=8, in_chans=1,
-                 embed_dim=256, depth=8, num_heads=8,
+    def __init__(self, img_size=300, patch_size=15, in_chans=1,
+                 embed_dim=256, depth=6, num_heads=8,
                  decoder_embed_dim=128, decoder_depth=4, decoder_num_heads=8,
                  mlp_ratio=4., norm_layer=nn.LayerNorm, norm_pix_loss=False):
         super().__init__()
