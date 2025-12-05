@@ -39,8 +39,18 @@ class Config:
     lr = 1e-4
 
     data_root = "/home/brainlab/Workspace/jycha/HTF/dicom"
-    save_path = "/home/brainlab/Workspace/jycha/HTF/model.pth"
     vis_dir = "/home/brainlab/Workspace/jycha/HTF/plot"
+    save_dir = "/home/brainlab/Workspace/jycha/HTF/checkpoints"
+
+
+# ============================================================
+# Reconstruction Accuracy
+# ============================================================
+def reconstruction_accuracy(orig, recon):
+    mse = torch.mean((orig - recon) ** 2, dim=[1, 2, 3])  # per sample
+    acc = 1.0 - mse
+    acc = torch.clamp(acc, 0.0, 1.0)
+    return acc.mean().item()
 
 
 # ============================================================
@@ -48,7 +58,7 @@ class Config:
 # ============================================================
 def visualize(img, pred, mask, cfg, save_name):
     """
-    img  : (1, 512, 512)
+    img  : (1, 384, 384)
     pred : (L, patch_dim)
     mask : (L)
     """
@@ -64,7 +74,12 @@ def visualize(img, pred, mask, cfg, save_name):
     # ----- reconstruction -----
     pred = pred.detach().cpu().numpy()  # (L, patch_dim)
     patches = pred.reshape(h, w, p, p)
-    rec_img = np.block([[patches[i, j] for j in range(w)] for i in range(h)])
+    recon = np.block([[patches[i, j] for j in range(w)] for i in range(h)])
+
+    # ----- masked image -----
+    mask_expanded = mask_2d.repeat(p, axis=0).repeat(p, axis=1)
+    masked_img = img.copy()
+    masked_img[mask_expanded == 1] = 0.5
 
     # ----- plot -----
     fig, ax = plt.subplots(1, 3, figsize=(12, 4))
@@ -73,11 +88,11 @@ def visualize(img, pred, mask, cfg, save_name):
     ax[0].set_title("Original")
     ax[0].axis("off")
 
-    ax[1].imshow(mask_2d, cmap="gray")
-    ax[1].set_title("Mask Map")
+    ax[1].imshow(masked_img, cmap="gray")
+    ax[1].set_title("Masked Input")
     ax[1].axis("off")
 
-    ax[2].imshow(rec_img, cmap="gray")
+    ax[2].imshow(recon, cmap="gray")
     ax[2].set_title("Reconstruction")
     ax[2].axis("off")
 
@@ -132,6 +147,7 @@ def train_mae():
 
         model.train()
         total_loss = 0
+        total_train_acc = 0
         optimizer.zero_grad()
 
         for step, img in enumerate(train_loader):
@@ -139,10 +155,15 @@ def train_mae():
             img = img.to(device)
             loss, pred, mask = model(img, mask_ratio=cfg.mask_ratio)
 
+            # reconstruction
+            recon = model.unpatchify(pred)
+            batch_acc = reconstruction_accuracy(img, recon)
+            total_train_acc += batch_acc
+
+            # loss backward
             loss = loss / cfg.accum_steps
             loss.backward()
 
-            # Gradient Accumulation
             if (step + 1) % cfg.accum_steps == 0:
                 optimizer.step()
                 optimizer.zero_grad()
@@ -150,26 +171,40 @@ def train_mae():
             total_loss += loss.item() * cfg.accum_steps
 
         train_loss = total_loss / len(train_loader)
+        train_acc = total_train_acc / len(train_loader)
 
         # Validation
         model.eval()
         val_total = 0
+        val_acc_total = 0
 
         with torch.no_grad():
             for img in val_loader:
                 img = img.to(device)
-                loss, _, _ = model(img, mask_ratio=cfg.mask_ratio)
+                loss, pred, mask = model(img, mask_ratio=cfg.mask_ratio)
                 val_total += loss.item()
 
-        val_loss = val_total / len(val_loader)
+                recon = model.unpatchify(pred)
+                val_acc_total += reconstruction_accuracy(img, recon)
 
-        print(f"[Epoch {epoch + 1:03d}] Train={train_loss:.4f} | Val={val_loss:.4f}")
+        val_loss = val_total / len(val_loader)
+        val_acc = val_acc_total / len(val_loader)
+
+        print(f"[Epoch {epoch + 1:03d}] Train Loss={train_loss:.4f} | Train Acc={train_acc:.4f} | Val Loss={val_loss:.4f} | Val Acc={val_acc:.4f}")
 
         # Save best model
         if val_loss < best_val_loss:
             best_val_loss = val_loss
-            torch.save(model.state_dict(), cfg.save_path)
-            print(f"[BEST SAVED] epoch={epoch + 1}, val={val_loss:.4f}")
+            best_path = os.path.join(cfg.save_dir, f"best_epoch{epoch + 1}.pth")
+            torch.save(model.state_dict(), best_path)
+
+            # overwrite best.pth
+            torch.save(model.state_dict(), os.path.join(cfg.save_dir, "best.pth"))
+
+            print(f"[BEST SAVED] {best_path}")
+
+        # Always save last
+        torch.save(model.state_dict(), os.path.join(cfg.save_dir, "last.pth"))
 
         # Visualization every 10 epochs
         if (epoch + 1) % 10 == 0:
@@ -182,7 +217,7 @@ def train_mae():
                 print(f"[VIS SAVED] {save_path}")
 
     print("\nTraining Completed.")
-    print(f"Best model saved at: {cfg.save_path}")
+    print(f"Best model saved inside: {cfg.save_dir}")
 
 
 # ============================================================
