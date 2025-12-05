@@ -29,7 +29,7 @@
   - forward_latent()이 CLS token만 추출하여 downstream task에서 feature로 사용하도록 설계됨
 - 이는 이후 disease classification 등 supervised fine-tuning에 활용됨
 
-④ Reconstruction-based Loss
+### ④ Reconstruction-based Loss
 - target: 입력 이미지를 patchify한 결과
 - pred: decoder가 복원한 패치
 - mask 위치만 loss 계산(MSE 기반)
@@ -47,4 +47,6 @@ CT Volume
   - (split 70:15:15) AutoMIL : 0.5752 (Best : 0.5841, epoch 42)
   - (split 60:20:20) AutoMIL : 0.5695 (Best : 0.6060, epoch 16)
  
+- MAE (img_size=384, patch_size=32, Epoch 3000, lr=1e-4, batch_size=8, accum_steps=4)
+  - ?
  
