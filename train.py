@@ -25,20 +25,20 @@ def set_seed(seed=777):
 # Config
 # ============================================================
 class Config:
-    image_size = 300          # 최종 입력 크기
-    patch_size = 15           # MAE의 internal patch size
+    image_size = 384
+    patch_size = 32
     mask_ratio = 0.75
     embed_dim = 256
     depth = 6
     num_heads = 8
     mlp_ratio = 4.0
 
-    batch_size = 64
+    batch_size = 8
     accum_steps = 4
     num_epochs = 3000
     lr = 1e-4
 
-    data_root = "/home/brainlab/Workspace/jycha/HTF/nifti_masked"
+    data_root = "/home/brainlab/Workspace/jycha/HTF/dicom"
     save_path = "/home/brainlab/Workspace/jycha/HTF/model.pth"
     vis_dir = "/home/brainlab/Workspace/jycha/HTF/plot"
 
@@ -48,7 +48,7 @@ class Config:
 # ============================================================
 def visualize(img, pred, mask, cfg, save_name):
     """
-    img  : (1, 128, 128)
+    img  : (1, 512, 512)
     pred : (L, patch_dim)
     mask : (L)
     """
@@ -56,8 +56,9 @@ def visualize(img, pred, mask, cfg, save_name):
     p = cfg.patch_size
 
     # ----- masked target patch map -----
-    mask = mask.detach().cpu().numpy()  # (L,)
-    h = w = int((mask.shape[0]) ** 0.5)
+    mask = mask.detach().cpu().numpy()
+    L = mask.shape[0]
+    h = w = int(np.sqrt(L))
     mask_2d = mask.reshape(h, w)
 
     # ----- reconstruction -----
@@ -87,7 +88,7 @@ def visualize(img, pred, mask, cfg, save_name):
 
 
 # ============================================================
-# MAE Training Code
+# MAE Training Loop
 # ============================================================
 def train_mae():
     set_seed(777)
@@ -96,28 +97,19 @@ def train_mae():
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"[Device] {device}")
 
-    # --------------------------------------------------------
-    # Load Dataset
-    # --------------------------------------------------------
+    # Load CT IDs (folder names)
     all_ct_ids = sorted([
-        f.replace(".nii.gz", "")
-        for f in os.listdir(cfg.data_root)
-        if f.endswith(".nii.gz")
+        d for d in os.listdir(cfg.data_root)
+        if os.path.isdir(os.path.join(cfg.data_root, d))
     ])
 
-    # --- Quick Test ---
-    all_ct_ids = all_ct_ids[:20]
-    print(f"[Quick Test Mode] Using {len(all_ct_ids)} CT volumes")
+    print(f"[Test] Using {len(all_ct_ids)} CT subjects")
 
     train_loader, val_loader = make_mae_dataloaders(
-        cfg.data_root,
-        all_ct_ids,
-        batch_size=cfg.batch_size
+        cfg.data_root, all_ct_ids, batch_size=cfg.batch_size
     )
 
-    # --------------------------------------------------------
     # Model
-    # --------------------------------------------------------
     model = MaskedAutoencoderViT(
         img_size=cfg.image_size,
         patch_size=cfg.patch_size,
@@ -133,33 +125,33 @@ def train_mae():
     print(model)
 
 
-    # --------------------------------------------------------
     # Train
-    # --------------------------------------------------------
     best_val_loss = 999
 
     for epoch in range(cfg.num_epochs):
+
         model.train()
         total_loss = 0
+        optimizer.zero_grad()
 
         for step, img in enumerate(train_loader):
-            img = img.to(device)
 
+            img = img.to(device)
             loss, pred, mask = model(img, mask_ratio=cfg.mask_ratio)
-            loss = loss / cfg.accum_steps  # loss scaling
+
+            loss = loss / cfg.accum_steps
             loss.backward()
 
+            # Gradient Accumulation
             if (step + 1) % cfg.accum_steps == 0:
                 optimizer.step()
                 optimizer.zero_grad()
 
-            total_loss += loss.item()
+            total_loss += loss.item() * cfg.accum_steps
 
         train_loss = total_loss / len(train_loader)
 
-        # ----------------------------------------------------
         # Validation
-        # ----------------------------------------------------
         model.eval()
         val_total = 0
 
@@ -171,28 +163,26 @@ def train_mae():
 
         val_loss = val_total / len(val_loader)
 
-        print(f"[Epoch {epoch+1:03d}] Train={train_loss:.4f} | Val={val_loss:.4f}")
+        print(f"[Epoch {epoch + 1:03d}] Train={train_loss:.4f} | Val={val_loss:.4f}")
 
-        # ----------------------------------------------------
-        # Save Best
-        # ----------------------------------------------------
+        # Save best model
         if val_loss < best_val_loss:
             best_val_loss = val_loss
             torch.save(model.state_dict(), cfg.save_path)
-            print(f"[BEST SAVED] epoch={epoch+1} | val_loss={val_loss:.4f}")
+            print(f"[BEST SAVED] epoch={epoch + 1}, val={val_loss:.4f}")
 
-        # ----------------------------------------------------
-        # Visualization (only first batch of val set)
-        # ----------------------------------------------------
-        with torch.no_grad():
-            img = next(iter(val_loader)).to(device)
-            _, pred, mask = model(img, mask_ratio=cfg.mask_ratio)
+        # Visualization every 10 epochs
+        if (epoch + 1) % 10 == 0:
+            with torch.no_grad():
+                img = next(iter(val_loader)).to(device)
+                _, pred, mask = model(img, mask_ratio=cfg.mask_ratio)
 
-            vis_path = os.path.join(cfg.vis_dir, f"epoch_{epoch+1}.png")
-            visualize(img[0], pred[0], mask[0], cfg, vis_path)
-            print(f"[VIS SAVED] {vis_path}")
+                save_path = os.path.join(cfg.vis_dir, f"epoch_{epoch + 1}.png")
+                visualize(img[0], pred[0], mask[0], cfg, save_path)
+                print(f"[VIS SAVED] {save_path}")
 
-    print(f"\nTraining Done. Best model: {cfg.save_path}")
+    print("\nTraining Completed.")
+    print(f"Best model saved at: {cfg.save_path}")
 
 
 # ============================================================

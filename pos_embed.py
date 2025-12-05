@@ -1,15 +1,11 @@
+# -*- coding:utf-8 -*-
 import torch
 import numpy as np
 
 
-# --------------------------------------------------------
-# 2D sine-cosine position embedding
-# References:
-# Transformer: https://github.com/tensorflow/models/blob/master/official/nlp/transformer/model_utils.py
-# MoCo v3: https://github.com/facebookresearch/moco-v3
-# --------------------------------------------------------
 def get_2d_sincos_pos_embed(embed_dim, grid_size, cls_token=False):
     """
+    2D sine-cosine position embedding
     grid_size: int or (H, W)
     return:
         pos_embed: shape (grid_size*grid_size, embed_dim)
