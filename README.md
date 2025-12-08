@@ -49,4 +49,10 @@ CT Volume
  
 - MAE (img_size=384*384, patch_size=32, Epoch 3000, lr=1e-4, batch_size=8, accum_steps=4)
   - (split 70:30) [Epoch 886] Train Loss=0.0136 | Train Acc=0.9264 | Val Loss=0.0193 | Val Acc=0.9229
+  - Epoch 10
+    ![epoch_10.png](../epoch_10.png)
+  - Epoch 1500
+    ![epoch_1500.png](../epoch_1500.png)
+  - Epoch 3000
+    ![epoch_3000.png](../epoch_3000.png)
  
