@@ -47,6 +47,6 @@ CT Volume
   - (split 70:15:15) AutoMIL : 0.5752 (Best : 0.5841, epoch 42)
   - (split 60:20:20) AutoMIL : 0.5695 (Best : 0.6060, epoch 16)
  
-- MAE (img_size=384, patch_size=32, Epoch 3000, lr=1e-4, batch_size=8, accum_steps=4)
-  - ?
+- MAE (img_size=384*384, patch_size=32, Epoch 3000, lr=1e-4, batch_size=8, accum_steps=4)
+  - (split 70:30) [Epoch 886] Train Loss=0.0136 | Train Acc=0.9264 | Val Loss=0.0193 | Val Acc=0.9229
  
